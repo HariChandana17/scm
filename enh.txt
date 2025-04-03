@@ -1,0 +1,1020 @@
+import streamlit as st
+import pandas as pd
+import pydeck as pdk
+from google.cloud import bigquery
+from google.oauth2 import service_account
+import os
+import numpy as np
+import sys
+import requests # Import for OSRM API calls
+import polyline # Import for decoding polyline geometries
+
+# --- Try Importing Necessary Libraries ---
+try:
+    import openpyxl
+except ImportError as e:
+    missing_lib = str(e).split("'")[-2]
+    st.error(f"Error: Missing required library '{missing_lib}'.")
+    st.info("Please install required libraries: pip install pandas openpyxl google-cloud-bigquery pydeck db-dtypes requests polyline")
+    st.stop()
+
+# --- Page Configuration - MUST BE THE FIRST STREAMLIT COMMAND ---
+st.set_page_config(
+    page_title="Business Operations Dashboard",
+    page_icon="🚚", # Changed icon slightly
+    layout="wide"
+)
+
+# ==============================================================================
+# Configuration Constants (from former config.py)
+# ==============================================================================
+
+# Excel File Paths (Update as needed)
+# Using relative paths for better portability if files are in the same dir or subdirs
+INVENTORY_EXCEL_PATH = "product_data.xlsx" # Example: Assumes file is in the same folder as the script
+ORDER_EXCEL_PATH = "Order Management.xlsx" # Example: Assumes file is in the same folder
+HISTORY_CSV_PATH = "Historical Product Demand.csv" # Example: Assumes file is in the same folder
+
+# --- Instructions for File Paths ---
+st.sidebar.info("""
+**File Locations:**
+Ensure the following files are accessible:
+- `product_data.xlsx` (Inventory)
+- `Order Management.xlsx` (Orders)
+- `Historical Product Demand.csv` (History)
+
+*Update paths in the script if files are elsewhere.*
+""")
+# --- Use Environment Variables or Secrets for GCP Project ID ---
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "gebu-data-ml-day0-01-333910") # Default if env var not set
+if GCP_PROJECT_ID == "gebu-data-ml-day0-01-333910": # Add a check for the default placeholder
+     st.sidebar.warning("Using default GCP Project ID. Set the `GCP_PROJECT_ID` environment variable or update the script for your project.", icon="⚠️")
+
+
+# BigQuery Configuration
+BQ_DATASET = "supply_chain" # Dataset for routes/locations
+BQ_LOCATIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.locations"
+BQ_ROUTES_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.routes"
+# Assuming forecast is in a different project/dataset based on the original ID
+BQ_FORECAST_TABLE_ID = "gebu-data-ml-day0-01-333910.demand_forecast.forecast1" # Keep specific ID for forecast
+
+# PyDeck Icon Configuration for Route Map
+# Using slightly different icons for potentially better visibility/meaning
+DC_PIN_URL = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png" # Red for DC
+STORE_PIN_URL = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png" # Blue for Stores
+PIN_WIDTH = 25 # Base width
+PIN_HEIGHT = 41 # Base height
+PIN_ANCHOR_Y = PIN_HEIGHT # Anchor at the bottom
+DC_LOC_ID = 'LOC0' # Explicitly define the DC Location ID used in the data
+
+# ==============================================================================
+# Styling (Enhanced UI)
+# ==============================================================================
+
+APP_STYLE = """
+<style>
+    /* --- Base & Font --- */
+    body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background-color: #f0f2f6; /* Light grey background */
+    }
+
+    /* --- Main Title Area --- */
+    .main-header {
+        background: linear-gradient(90deg, #007bff, #0056b3); /* Standard blue gradient */
+        padding: 25px 40px; /* More padding */
+        border-radius: 10px;
+        margin-bottom: 35px;
+        box-shadow: 0 6px 15px rgba(0, 86, 179, 0.25);
+    }
+    .main-title {
+        color: white;
+        text-align: center;
+        font-weight: 600;
+        font-size: 2.5em; /* Slightly larger */
+        margin: 0;
+        text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.2);
+    }
+
+    /* --- Tab Headers --- */
+    /* Style Streamlit's native tabs */
+    .stTabs [data-baseweb="tab-list"] {
+		gap: 24px; /* More space between tabs */
+	}
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #f0f2f6; /* Match page background */
+        border-radius: 8px 8px 0px 0px; /* Rounded top corners */
+        gap: 8px;
+        padding: 10px 20px; /* Adjust padding */
+        transition: background-color 0.3s ease, color 0.3s ease;
+    }
+	.stTabs [aria-selected="true"] {
+  		background-color: #ffffff; /* White background for selected tab */
+        color: #007bff; /* Blue text for selected tab */
+        font-weight: 600;
+	}
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #e9ecef; /* Light hover effect */
+    }
+
+    /* --- Section Headers within Tabs --- */
+    .tab-section-header {
+        color: #0056b3;
+        font-weight: 600;
+        border-bottom: 3px solid #007bff;
+        padding-bottom: 10px;
+        margin-top: 20px; /* Add space above headers */
+        margin-bottom: 30px; /* More space below headers */
+        font-size: 1.8em; /* Larger section titles */
+    }
+     .sub-header { /* For forecast sections */
+        color: #343a40; /* Darker grey */
+        font-weight: 500;
+        margin-top: 25px;
+        margin-bottom: 15px;
+        font-size: 1.4em; /* Slightly larger sub-headers */
+        border-left: 4px solid #17a2b8; /* Use a different accent color (info blue) */
+        padding-left: 12px;
+    }
+
+    /* --- Info Cards --- */
+    .card-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); /* Slightly wider min width */
+        gap: 25px; /* Increased gap */
+        margin-bottom: 35px; /* More space below cards */
+    }
+    .info-card, .warning-card, .success-card, .neutral-card {
+        background-color: #ffffff;
+        border: 1px solid #dee2e6; /* Lighter border */
+        border-radius: 10px; /* More rounded corners */
+        padding: 25px; /* More padding */
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.07); /* Softer shadow */
+        transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        height: 100%; /* Ensure cards in a row have same height */
+        border-top: 5px solid; /* Thicker top border for accent */
+    }
+    .info-card:hover, .warning-card:hover, .success-card:hover, .neutral-card:hover {
+        transform: translateY(-5px); /* Slightly more lift */
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1); /* Stronger hover shadow */
+    }
+    .card-label {
+        font-size: 1em; /* Slightly larger label */
+        color: #495057; /* Darker grey label */
+        margin-bottom: 10px;
+        font-weight: 500;
+    }
+    .card-value {
+        font-size: 2.2em; /* Larger value */
+        font-weight: 700;
+        line-height: 1.2; /* Adjust line height */
+    }
+
+    /* Card Accent Colors (using top border) */
+    .info-card { border-top-color: #007bff; }
+    .info-card .card-value { color: #007bff; }
+    .warning-card { border-top-color: #ffc107; }
+    .warning-card .card-value { color: #ff9800; } /* Keep orange value for warning */
+    .success-card { border-top-color: #28a745; }
+    .success-card .card-value { color: #28a745; }
+    .neutral-card { border-top-color: #6c757d; }
+    .neutral-card .card-value { color: #6c757d; }
+
+    /* --- Legend Styling --- */
+    .legend-container {
+        margin-bottom: 25px;
+        padding: 15px 20px;
+        background-color: #ffffff; /* White background */
+        border: 1px solid #e9ecef;
+        border-radius: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px; /* More gap */
+        align-items: center;
+        box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05); /* Subtle shadow */
+    }
+    .legend-title {
+        font-weight: 600;
+        margin-right: 15px;
+        color: #343a40; /* Darker title */
+    }
+    .legend-item {
+        display: inline-flex;
+        align-items: center;
+        padding: 6px 12px; /* Adjust padding */
+        border-radius: 16px; /* Pill shape */
+        font-size: 0.9em;
+        border: 1px solid transparent;
+    }
+    .legend-color-box {
+        width: 14px; /* Slightly larger box */
+        height: 14px;
+        margin-right: 10px; /* More space */
+        border-radius: 4px; /* Rounded square */
+        display: inline-block;
+    }
+    /* Legend Item Colors */
+    .legend-red { background-color: #ffebee; border-color: #ffcdd2; color: #c62828; }
+    .legend-red .legend-color-box { background-color: #ef5350; }
+    .legend-orange { background-color: #fff8e1; border-color: #ffecb3; color: #ef6c00; } /* Adjusted orange */
+    .legend-orange .legend-color-box { background-color: #ffa726; }
+    .legend-green { background-color: #e8f5e9; border-color: #c8e6c9; color: #2e7d32; }
+    .legend-green .legend-color-box { background-color: #66bb6a; }
+
+    /* --- Forecast Section Spacing --- */
+    .forecast-section {
+        margin-top: 35px;
+        padding-top: 20px;
+        border-top: 1px solid #dee2e6; /* Separator line */
+    }
+
+    /* --- Dataframe & Map Styling --- */
+    .stDataFrame, .stPyDeckChart {
+        margin-top: 25px;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.06); /* Add shadow to tables/maps */
+    }
+
+    /* --- Footer Caption Style --- */
+     .footer-caption {
+        text-align: center;
+        font-style: italic;
+        color: #6c757d; /* Grey color */
+        margin-top: 50px;
+        border-top: 1px solid #e0e0e0;
+        padding-top: 20px;
+        font-size: 0.9em;
+    }
+
+    /* --- Improve Selectbox Look --- */
+    .stSelectbox div[data-baseweb="select"] > div {
+        background-color: #ffffff; /* White background */
+        border-radius: 6px;
+    }
+</style>
+"""
+
+def apply_styling():
+    """Applies the custom CSS to the Streamlit app."""
+    st.markdown(APP_STYLE, unsafe_allow_html=True)
+
+# ==============================================================================
+# BigQuery Client Initialization
+# ==============================================================================
+@st.cache_resource
+def get_bq_client():
+    """Initializes and returns a BigQuery client silently, prioritizing ADC."""
+    client = None
+    # Try Application Default Credentials (ADC) - Preferred for Cloud Run/Functions/Compute
+    try:
+        print("Attempting BigQuery connection using ADC...")
+        client_adc = bigquery.Client(project=GCP_PROJECT_ID)
+        # Test connection with a simple query
+        client_adc.query("SELECT 1 LIMIT 1").result()
+        print(f"Connection successful using ADC (Project: {GCP_PROJECT_ID}).")
+        return client_adc
+    except Exception as e_adc:
+        print(f"ADC connection failed: {e_adc}")
+
+    # Try Streamlit Secrets (if deployed on Streamlit Community Cloud)
+    try:
+        if 'gcp_service_account' in st.secrets:
+            print("Trying connection via Streamlit Secrets...")
+            credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+            client_secrets = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
+            client_secrets.query("SELECT 1 LIMIT 1").result()
+            print(f"Connection successful using Streamlit Secrets (Project: {GCP_PROJECT_ID}).")
+            return client_secrets
+        else:
+             print("Streamlit Secrets ('gcp_service_account') not found.")
+    except Exception as e_secrets:
+        print(f"Secrets connection failed: {e_secrets}")
+
+    # Try Environment Variable (GOOGLE_APPLICATION_CREDENTIALS) - Common locally/containers
+    try:
+        credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if credentials_path:
+            print(f"Trying connection via GOOGLE_APPLICATION_CREDENTIALS: {credentials_path}...")
+            credentials = service_account.Credentials.from_service_account_file(credentials_path)
+            client_env = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
+            client_env.query("SELECT 1 LIMIT 1").result()
+            print(f"Connection successful using Service Account Env Var (Project: {GCP_PROJECT_ID}).")
+            return client_env
+        else:
+             print("GOOGLE_APPLICATION_CREDENTIALS environment variable not set.")
+    except Exception as e_sa:
+        print(f"Service Account (Env Var) connection failed: {e_sa}")
+
+    # If all methods fail
+    st.error(f"Fatal: Could not connect to BigQuery project '{GCP_PROJECT_ID}'. Please check credentials (ADC, Streamlit Secrets, or GOOGLE_APPLICATION_CREDENTIALS environment variable). Route Optimization tab will be disabled.", icon="❌")
+    print("Fatal: Could not connect to BigQuery using any method.")
+    return None # Return None if all failed
+
+# Initialize client globally AFTER set_page_config
+bq_client = get_bq_client()
+
+# ==============================================================================
+# Data Loading & Processing Functions
+# ==============================================================================
+
+# --- Excel/CSV Loading ---
+def load_file(file_path, file_type='excel', data_label="Data"):
+    """Loads data from Excel or CSV, strips columns, and handles basic errors."""
+    df = None
+    try:
+        if file_type == 'excel':
+            df = pd.read_excel(file_path, engine='openpyxl')
+        elif file_type == 'csv':
+            df = pd.read_csv(file_path)
+        else:
+            st.error(f"Unsupported file type '{file_type}' for {file_path}", icon="❌")
+            return None
+
+        df.columns = df.columns.str.strip()
+        if df.empty:
+            st.warning(f"{data_label}: File is empty: `{os.path.basename(file_path)}`", icon="📄")
+        else:
+            print(f"Successfully loaded {data_label} from {os.path.basename(file_path)}") # Log success
+        return df
+    except FileNotFoundError:
+        st.error(f"{data_label} Error: File not found at `{file_path}`. Please ensure the file exists.", icon="❌")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred while reading {data_label} file (`{os.path.basename(file_path)}`): {e}", icon="❌")
+        return None
+
+@st.cache_data
+def load_all_local_data():
+    """Loads all data from local Excel and CSV files."""
+    df_inv_raw = load_file(INVENTORY_EXCEL_PATH, file_type='excel', data_label="Inventory")
+    df_ord_raw = load_file(ORDER_EXCEL_PATH, file_type='excel', data_label="Orders")
+    df_hist_raw = load_file(HISTORY_CSV_PATH, file_type='csv', data_label="Historical Demand")
+    return df_inv_raw, df_ord_raw, df_hist_raw
+
+# --- BigQuery Data Fetching (Routes/Locations) ---
+@st.cache_data(ttl=600) # Cache for 10 minutes
+def get_available_weeks_riders(_client):
+    if not _client: return pd.DataFrame({'WeekNo': [], 'RiderID': []})
+    query = f"""
+        SELECT DISTINCT WeekNo, RiderID
+        FROM `{BQ_ROUTES_TABLE}`
+        WHERE WeekNo IS NOT NULL AND RiderID IS NOT NULL
+        ORDER BY WeekNo DESC, RiderID ASC
+    """
+    try:
+        df = _client.query(query).to_dataframe(create_bqstorage_client=True, dtypes={"WeekNo": pd.Int64Dtype()})
+        print(f"Fetched {len(df)} week/rider combinations from {BQ_ROUTES_TABLE}")
+        return df
+    except Exception as e:
+        st.exception(f"Error fetching week/rider data from {BQ_ROUTES_TABLE}: {e}")
+        return pd.DataFrame({'WeekNo': pd.Series(dtype='Int64'), 'RiderID': pd.Series(dtype='str')})
+
+@st.cache_data(ttl=600) # Cache for 10 minutes
+def get_route_data(_client, week: int, rider: str):
+    if not _client: return pd.DataFrame() # Return empty DataFrame
+    # Basic input validation
+    if not isinstance(week, (int, np.integer)) or not isinstance(rider, str) or not rider:
+        st.error("Invalid week or rider selection for route data.")
+        return pd.DataFrame()
+
+    query = f"""
+        SELECT Seq, LocID
+        FROM `{BQ_ROUTES_TABLE}`
+        WHERE WeekNo = @week_no AND RiderID = @rider_id
+        ORDER BY Seq ASC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("week_no", "INT64", int(week)), # Ensure int
+            bigquery.ScalarQueryParameter("rider_id", "STRING", rider)
+        ]
+    )
+    try:
+        df = _client.query(query, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+        print(f"Fetched {len(df)} route points for W{week}, R{rider} from {BQ_ROUTES_TABLE}")
+        # Ensure expected columns exist even if query returns nothing
+        if 'Seq' not in df.columns: df['Seq'] = pd.Series(dtype='int64')
+        if 'LocID' not in df.columns: df['LocID'] = pd.Series(dtype='str')
+        return df[['Seq', 'LocID']] # Return only expected columns
+    except Exception as e:
+        st.exception(f"Error fetching route data for W{week}, R{rider} from {BQ_ROUTES_TABLE}: {e}")
+        return pd.DataFrame({'Seq': [], 'LocID': []}) # Return empty structure on error
+
+@st.cache_data(ttl=3600) # Cache for 1 hour
+def get_location_data(_client, loc_ids: list):
+    if not _client: return pd.DataFrame()
+    if not loc_ids or not isinstance(loc_ids, list):
+         return pd.DataFrame({'LocID': [], 'LocName': [], 'Lat': [], 'Long': []}) # Return empty structure
+
+    query = f"""
+        SELECT LocID, LocName, Lat, Long
+        FROM `{BQ_LOCATIONS_TABLE}`
+        WHERE LocID IN UNNEST(@loc_ids)
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("loc_ids", "STRING", loc_ids)]
+    )
+    try:
+        df = _client.query(query, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+        print(f"Fetched {len(df)} location details from {BQ_LOCATIONS_TABLE}")
+        # Data type conversion and validation
+        df['Lat'] = pd.to_numeric(df['Lat'], errors='coerce')
+        df['Long'] = pd.to_numeric(df['Long'], errors='coerce')
+        missing_coords = df[df['Lat'].isnull() | df['Long'].isnull()]['LocID'].tolist()
+        if missing_coords:
+            st.warning(f"Location data warning: Missing coordinates for LocIDs: {', '.join(missing_coords)}", icon="⚠️")
+        # Ensure expected columns exist even if query returns nothing
+        for col in ['LocID', 'LocName', 'Lat', 'Long']:
+            if col not in df.columns: df[col] = pd.Series(dtype='str' if col != 'Lat' and col != 'Long' else 'float64')
+        return df[['LocID', 'LocName', 'Lat', 'Long']]
+    except Exception as e:
+        st.exception(f"Error fetching location data from {BQ_LOCATIONS_TABLE}: {e}")
+        return pd.DataFrame({'LocID': [], 'LocName': [], 'Lat': [], 'Long': []})
+
+# --- BigQuery Data Fetching (Forecast) ---
+@st.cache_data(ttl=1800) # Cache forecast data for 30 mins
+def load_bigquery_forecast(_client):
+    if not _client: return None
+    # Check if the table ID seems valid (basic check)
+    if '.' not in BQ_FORECAST_TABLE_ID or len(BQ_FORECAST_TABLE_ID.split('.')) != 3:
+         st.error(f"Invalid BigQuery Table ID format for forecast: '{BQ_FORECAST_TABLE_ID}'. Expected 'project.dataset.table'.", icon="❌")
+         return None
+
+    query = f"SELECT * FROM `{BQ_FORECAST_TABLE_ID}` ORDER BY date DESC" # Adjust 'date' column name if needed
+    try:
+        df = _client.query(query).to_dataframe(create_bqstorage_client=True)
+        print(f"Fetched {len(df)} forecast records from {BQ_FORECAST_TABLE_ID}")
+        # Data type conversions (example)
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            if df['date'].isnull().any():
+                st.warning("Forecast Warning: Some 'date' values could not be converted and were set to NaT.", icon="⚠️")
+        # Add other type conversions as necessary (e.g., numeric forecasts)
+        # Example: Convert a column named 'forecasted_demand' to numeric
+        # if 'forecasted_demand' in df.columns:
+        #     df['forecasted_demand'] = pd.to_numeric(df['forecasted_demand'], errors='coerce')
+        #     if df['forecasted_demand'].isnull().any():
+        #         st.warning("Forecast Warning: Some 'forecasted_demand' values are non-numeric.", icon="⚠️")
+        return df
+    except Exception as e:
+        # Check for common "Not Found" error
+        if "Not found: Table" in str(e):
+             st.error(f"BigQuery Error: Forecast table not found: `{BQ_FORECAST_TABLE_ID}`. Please verify the table exists and you have access permissions.", icon="❌")
+        else:
+             st.exception(f"Error loading forecast data from BigQuery table {BQ_FORECAST_TABLE_ID}: {e}")
+        return None
+
+# --- Inventory Cleaning/Highlighting ---
+def clean_and_validate_inventory(df):
+    if df is None: return None
+    required_cols = ['Quantity', 'Demand (Required)'] # Core columns needed for highlighting
+    numeric_cols = ['Price (USD)', 'Quantity', 'Discount (%)', 'Demand (Required)'] # Columns expected to be numeric
+
+    # Check for missing required columns
+    missing_req = [col for col in required_cols if col not in df.columns]
+    if missing_req:
+        st.error(f"Inventory Error: Missing required columns: {', '.join(missing_req)}. Cannot process inventory status.", icon="❗")
+        return None
+
+    df_cleaned = df.copy()
+    issues = []
+
+    # Convert numeric columns and flag rows with conversion errors
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            # Check if already numeric, skip conversion if so
+            if pd.api.types.is_numeric_dtype(df_cleaned[col]):
+                continue
+            initial_nulls = df_cleaned[col].isnull().sum()
+            df_cleaned[col] = pd.to_numeric(df_cleaned[col], errors='coerce')
+            final_nulls = df_cleaned[col].isnull().sum()
+            if final_nulls > initial_nulls:
+                 issues.append(f"Non-numeric values found in '{col}'")
+
+    if issues:
+        st.warning(f"Inventory Warning: Encountered data type issues. Non-numeric values ignored. Details: {'; '.join(issues)}", icon="⚠️")
+
+    # Drop rows where essential columns ('Quantity', 'Demand (Required)') are missing/invalid *after* conversion attempt
+    initial_rows = len(df_cleaned)
+    df_cleaned.dropna(subset=required_cols, inplace=True)
+    rows_dropped = initial_rows - len(df_cleaned)
+    if rows_dropped > 0:
+        st.warning(f"Inventory Warning: {rows_dropped} rows removed due to missing or invalid required values ('Quantity', 'Demand (Required)').", icon="⚠️")
+
+    if df_cleaned.empty:
+        st.error("Inventory Error: No valid data remaining after cleaning. Cannot display inventory status.", icon="❗")
+        return None
+
+    return df_cleaned
+
+def highlight_demand(row):
+    """Applies background color based on Quantity vs Demand."""
+    # Ensure values are numeric before comparison
+    demand = pd.to_numeric(row.get('Demand (Required)'), errors='coerce')
+    quantity = pd.to_numeric(row.get('Quantity'), errors='coerce')
+    num_cols = len(row)
+
+    # Default style if data is missing/invalid
+    style_default = 'background-color: #ffffff' # Default white
+
+    if pd.isna(demand) or pd.isna(quantity):
+        return [style_default] * num_cols
+
+    if demand > quantity:
+        style = 'background-color: #ffebee' # Light Red (Shortage) - from CSS legend-red
+    elif demand == quantity:
+        style = 'background-color: #fff8e1' # Light Yellow/Orange (Exact) - from CSS legend-orange
+    else: # demand < quantity
+        style = 'background-color: #e8f5e9' # Light Green (Surplus) - from CSS legend-green
+
+    return [style] * num_cols
+
+# --- OSRM Route Fetching Function ---
+@st.cache_data(ttl=3600) # Cache OSRM results for 1 hour
+def get_osrm_route(points_df):
+    """
+    Gets the road route geometry from OSRM for a sequence of points.
+    Expects a DataFrame with 'Long' and 'Lat' columns, ordered by sequence.
+    Returns a list of [lon, lat] coordinates for the route path, or None on error.
+    """
+    if points_df.shape[0] < 2:
+        st.info("Need at least two points to calculate a route.")
+        return None # Need at least two points
+
+    # Ensure Lat/Long are numeric
+    points_df['Lat'] = pd.to_numeric(points_df['Lat'], errors='coerce')
+    points_df['Long'] = pd.to_numeric(points_df['Long'], errors='coerce')
+    valid_points = points_df.dropna(subset=['Lat', 'Long'])
+
+    if valid_points.shape[0] < 2:
+         st.warning("Not enough valid coordinate pairs to calculate a route after removing missing values.")
+         return None
+
+    # Format coordinates for OSRM API: lon1,lat1;lon2,lat2;...
+    locs_str = ";".join([f"{lon},{lat}" for lon, lat in valid_points[['Long', 'Lat']].values])
+    # Use the demo server URL
+    osrm_base_url = "http://router.project-osrm.org/route/v1/driving/"
+    # Request full overview geometry using polyline encoding
+    request_url = f"{osrm_base_url}{locs_str}?overview=full&geometries=polyline"
+
+    try:
+        print(f"Requesting OSRM URL (first 80 chars): {request_url[:80]}...") # Log request start
+        response = requests.get(request_url, timeout=20) # Slightly longer timeout
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        route_data = response.json()
+
+        if route_data.get('code') == 'Ok' and route_data.get('routes'):
+            # Decode the geometry of the first (usually best) route
+            encoded_polyline = route_data['routes'][0]['geometry']
+            # polyline.decode returns list of (lat, lon) tuples
+            decoded_coords_lat_lon = polyline.decode(encoded_polyline)
+            # Convert to list of [lon, lat] for PyDeck PathLayer
+            route_path_lon_lat = [[lon, lat] for lat, lon in decoded_coords_lat_lon]
+            print(f"OSRM route found with {len(route_path_lon_lat)} points.")
+            return route_path_lon_lat
+        else:
+            osrm_message = route_data.get('message', 'No route found or error returned')
+            st.warning(f"OSRM could not find a route: {osrm_message}", icon="🗺️")
+            print(f"OSRM Warning: {osrm_message}")
+            return None
+    except requests.exceptions.Timeout:
+        st.error("Error calling OSRM API: Request timed out. The public OSRM demo server might be busy or unavailable. Please try again later.", icon="⏳")
+        print("OSRM Error: Request Timeout")
+        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error calling OSRM API: {e}", icon="🌐")
+        print(f"OSRM Error: RequestException - {e}")
+        return None
+    except (KeyError, IndexError, ValueError) as e:
+         st.error(f"Error processing OSRM response: Invalid data structure received. {e}", icon="⚠️")
+         print(f"OSRM Error: Processing response - {e}")
+         return None
+    except Exception as e:
+        st.error(f"An unexpected error occurred during OSRM route fetching: {e}", icon="❓")
+        print(f"OSRM Error: Unexpected - {e}")
+        return None
+
+
+# ==============================================================================
+# Streamlit App Layout
+# ==============================================================================
+
+# --- Apply Styling ---
+apply_styling()
+
+# --- Load Data ---
+# Use st.spinner for better user feedback during loading
+with st.spinner('Loading local data files...'):
+    df_inventory_raw, df_orders_raw, df_history_demand = load_all_local_data()
+with st.spinner('Loading forecast data from BigQuery...'):
+    df_forecast_demand = load_bigquery_forecast(bq_client) # Load forecast BQ
+
+# --- Process Data ---
+# Process inventory data only if it loaded successfully
+df_inventory_cleaned = clean_and_validate_inventory(df_inventory_raw) if df_inventory_raw is not None else None
+# Keep orders raw for display unless specific cleaning is needed
+df_orders_display = df_orders_raw
+
+# --- Main Header ---
+st.markdown('<div class="main-header"><h1 class="main-title">🚚 Business Operations Dashboard</h1></div>', unsafe_allow_html=True)
+
+# --- Create Tabs ---
+tab_demand, tab_inventory, tab_orders, tab_route_opt = st.tabs([
+    "📈 Sales & Demand", # Combined historical and forecast
+    "📊 Inventory Status",
+    "🛒 Order Management",
+    "🗺️ Route Optimization" # Renamed Tab
+])
+
+
+# --- Render Sales & Demand Tab ---
+with tab_demand:
+    st.markdown('<h2 class="tab-section-header">Demand Overview</h2>', unsafe_allow_html=True)
+
+    # --- Historical Demand Section (from CSV) ---
+    st.markdown('<h3 class="sub-header">Historical Demand Data</h3>', unsafe_allow_html=True)
+    if df_history_demand is not None:
+        if not df_history_demand.empty:
+            st.dataframe(df_history_demand, use_container_width=True)
+            st.caption(f"Data loaded from: `{os.path.basename(HISTORY_CSV_PATH)}`")
+        # No message needed if loaded but empty (handled by load_file)
+    # else: # Error message already shown by load_file
+        # st.info("Historical demand data file (`.csv`) could not be loaded or is empty.")
+
+
+    # --- Forecasted Demand Section (from BigQuery) ---
+    st.markdown('<div class="forecast-section">', unsafe_allow_html=True) # Add spacing and separator
+    st.markdown('<h3 class="sub-header">Forecasted Demand Data</h3>', unsafe_allow_html=True)
+    if df_forecast_demand is not None:
+        if not df_forecast_demand.empty:
+            st.dataframe(df_forecast_demand, use_container_width=True)
+            st.caption(f"Data loaded from BigQuery table: `{BQ_FORECAST_TABLE_ID}`")
+        # No message needed if loaded but empty (handled by load_bigquery_forecast)
+    else:
+        # Error message already shown by load_bigquery_forecast
+         st.info("Demand forecast data from BigQuery could not be loaded or is unavailable.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# --- Render Inventory Tab ---
+with tab_inventory:
+    st.markdown('<h2 class="tab-section-header">Inventory Status</h2>', unsafe_allow_html=True)
+
+    if df_inventory_cleaned is not None and not df_inventory_cleaned.empty:
+        # Calculate metrics *after* cleaning
+        total_items = len(df_inventory_cleaned)
+        # Ensure columns are numeric before comparison (already done in clean func, but double check)
+        df_inventory_cleaned['Quantity'] = pd.to_numeric(df_inventory_cleaned['Quantity'], errors='coerce')
+        df_inventory_cleaned['Demand (Required)'] = pd.to_numeric(df_inventory_cleaned['Demand (Required)'], errors='coerce')
+        valid_data = df_inventory_cleaned.dropna(subset=['Demand (Required)', 'Quantity'])
+
+        shortages = len(valid_data[valid_data['Demand (Required)'] > valid_data['Quantity']])
+        exact_match = len(valid_data[valid_data['Demand (Required)'] == valid_data['Quantity']])
+        surplus = len(valid_data[valid_data['Demand (Required)'] < valid_data['Quantity']])
+
+        # --- Cards using card-container ---
+        card_html = f"""
+        <div class="card-container">
+            <div class="info-card">
+                <span class="card-label">Total Valid Items</span>
+                <span class="card-value">{total_items}</span>
+            </div>
+            <div class="warning-card">
+                <span class="card-label">Items with Shortage</span>
+                <span class="card-value">{shortages}</span>
+            </div>
+            <div class="neutral-card">
+                <span class="card-label">Items with Exact Match</span>
+                <span class="card-value">{exact_match}</span>
+            </div>
+             <div class="success-card">
+                <span class="card-label">Items with Surplus</span>
+                <span class="card-value">{surplus}</span>
+            </div>
+        </div>
+        """
+        st.markdown(card_html, unsafe_allow_html=True)
+
+        # Legend
+        st.markdown("""
+        <div class="legend-container">
+            <span class="legend-title">Table Key:</span>
+            <span class="legend-item legend-red"><span class="legend-color-box"></span>Demand > Quantity (Shortage)</span>
+            <span class="legend-item legend-orange"><span class="legend-color-box"></span>Demand = Quantity (Exact)</span>
+            <span class="legend-item legend-green"><span class="legend-color-box"></span>Demand < Quantity (Surplus)</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Table with Highlighting
+        # Display specific columns if needed, or all columns
+        # display_cols = ['ProductID', 'ProductName', 'Quantity', 'Demand (Required)', 'Price (USD)', 'Category'] # Example
+        # st.dataframe(
+        #     df_inventory_cleaned[display_cols].style.apply(highlight_demand, axis=1),
+        #     use_container_width=True
+        # )
+        st.dataframe(
+             df_inventory_cleaned.style.apply(highlight_demand, axis=1),
+             use_container_width=True
+        )
+        st.caption(f"Data loaded from: `{os.path.basename(INVENTORY_EXCEL_PATH)}`")
+    else:
+        st.info(f"Inventory data unavailable or invalid. Please check the file `{os.path.basename(INVENTORY_EXCEL_PATH)}` and ensure it has the required columns ('Quantity', 'Demand (Required)').", icon="ℹ️")
+
+
+# --- Render Orders Tab ---
+with tab_orders:
+    st.markdown('<h2 class="tab-section-header">Order Management</h2>', unsafe_allow_html=True)
+
+    if df_orders_display is not None and not df_orders_display.empty:
+        total_orders = len(df_orders_display)
+        # Add more metrics if relevant columns exist (e.g., 'Status', 'OrderValue')
+        # Example:
+        # pending_orders = len(df_orders_display[df_orders_display['Status'] == 'Pending']) if 'Status' in df_orders_display else 'N/A'
+        # total_value = df_orders_display['OrderValue'].sum() if 'OrderValue' in df_orders_display and pd.api.types.is_numeric_dtype(df_orders_display['OrderValue']) else 'N/A'
+
+        # --- Cards for Orders Tab ---
+        card_html_orders = f"""
+        <div class="card-container">
+            <div class="info-card">
+                <span class="card-label">Total Orders Loaded</span>
+                <span class="card-value">{total_orders}</span>
+            </div>
+            """
+        # Add more cards conditionally
+        # if 'Status' in df_orders_display:
+        #      card_html_orders += f"""
+        #       <div class="neutral-card">
+        #           <span class="card-label">Pending Orders</span>
+        #           <span class="card-value">{pending_orders}</span>
+        #       </div>
+        #      """
+        # if 'OrderValue' in df_orders_display:
+        #      card_html_orders += f"""
+        #      <div class="success-card">
+        #           <span class="card-label">Total Order Value</span>
+        #           <span class="card-value">${total_value:,.2f}</span> {# Format as currency #}
+        #      </div>
+        #      """
+        card_html_orders += "</div>" # Close card-container
+        st.markdown(card_html_orders, unsafe_allow_html=True)
+        # --- End of Cards ---
+
+        st.dataframe(df_orders_display, use_container_width=True)
+        st.caption(f"Data loaded from: `{os.path.basename(ORDER_EXCEL_PATH)}`")
+
+    elif df_orders_display is not None: # Loaded but empty
+         st.info(f"The Order Management file (`{os.path.basename(ORDER_EXCEL_PATH)}`) was loaded but is empty.", icon="📄")
+    # else: # Failed to load (error shown by load_file)
+        # st.info("Order Management data could not be loaded. Please check the file path and format.", icon="ℹ️")
+
+
+# --- Render Route Optimization Tab ---
+with tab_route_opt:
+    st.markdown('<h2 class="tab-section-header">Route Optimization & Visualization</h2>', unsafe_allow_html=True)
+
+    if bq_client is None:
+        st.warning("BigQuery connection is unavailable. Route Optimization features are disabled.", icon="☁️")
+    else:
+        # --- Selection Controls ---
+        weeks_riders_df = get_available_weeks_riders(bq_client) # Pass client
+
+        if weeks_riders_df.empty:
+            st.warning("Could not load week/rider data from BigQuery, or no routes found.", icon="⚠️")
+            available_weeks = []
+            selected_week = None
+            selected_rider = None
+        else:
+            available_weeks = sorted(weeks_riders_df['WeekNo'].dropna().unique().astype(int), reverse=True)
+            if not available_weeks:
+                 st.warning("No valid Week Numbers found in the route data.", icon="⚠️")
+                 selected_week = None
+                 selected_rider = None
+
+        # Place selectors in columns
+        col_select1, col_select2 = st.columns([1, 2]) # Adjust column width ratio if needed
+
+        with col_select1:
+            selected_week = st.selectbox(
+                "Select Week:",
+                available_weeks,
+                index=0 if available_weeks else None,
+                key="route_week_selector",
+                # help="Select the week number for the route."
+            )
+
+        with col_select2:
+            riders_in_week = []
+            if selected_week is not None and not weeks_riders_df.empty:
+                riders_in_week = sorted(weeks_riders_df[weeks_riders_df['WeekNo'] == selected_week]['RiderID'].unique())
+
+            selected_rider = st.selectbox(
+                "Select Rider:",
+                riders_in_week,
+                index=0 if riders_in_week else None,
+                key="route_rider_selector",
+                # help="Select the rider ID for the chosen week.",
+                disabled=(selected_week is None or not riders_in_week) # Disable if no week or riders
+            )
+            if selected_week is not None and not riders_in_week:
+                 st.caption("No riders found for the selected week.")
+
+
+        # --- Map and Details Display ---
+        st.divider() # Add a visual separator
+
+        if selected_week is not None and selected_rider:
+            st.markdown(f"#### Route for Week `{selected_week}`, Rider `{selected_rider}`")
+
+            # Get route sequence and location data in parallel (if possible, though Streamlit runs sequentially)
+            with st.spinner(f"Loading route and location data for W{selected_week}, R{selected_rider}..."):
+                rider_route_df = get_route_data(bq_client, selected_week, selected_rider) # Pass client
+
+                if rider_route_df.empty:
+                    st.warning(f"No route sequence data found for Week {selected_week}, Rider {selected_rider}.", icon="📍")
+                else:
+                    unique_loc_ids = rider_route_df['LocID'].unique().tolist()
+                    if not unique_loc_ids:
+                        st.warning("Route sequence loaded, but it contains no Location IDs.", icon="🤨")
+                    else:
+                        locations_df = get_location_data(bq_client, unique_loc_ids) # Pass client
+
+                        if locations_df.empty:
+                            st.error(f"Could not find location details for LocIDs in the route: {', '.join(unique_loc_ids)}.", icon="❌")
+                        else:
+                            # Merge route sequence with location details
+                            route_details_df = pd.merge(rider_route_df, locations_df, on='LocID', how='left')
+
+                            # Validate merged data (check for missing coords again after merge)
+                            route_details_df['Lat'] = pd.to_numeric(route_details_df['Lat'], errors='coerce')
+                            route_details_df['Long'] = pd.to_numeric(route_details_df['Long'], errors='coerce')
+                            missing_coords_rows = route_details_df[route_details_df['Lat'].isnull() | route_details_df['Long'].isnull()]
+
+                            if not missing_coords_rows.empty:
+                                missing_ids = missing_coords_rows['LocID'].unique().tolist()
+                                st.warning(f"Some locations in the route are missing coordinates and will be excluded from the map: {', '.join(missing_ids)}", icon="⚠️")
+                                route_details_df.dropna(subset=['Lat', 'Long'], inplace=True)
+
+                            # Sort by sequence number *after* cleaning
+                            route_details_df = route_details_df.sort_values(by='Seq').reset_index(drop=True)
+
+                            if route_details_df.empty:
+                                st.warning("No valid locations with coordinates remain for this route.", icon="🙁")
+                            else:
+                                # --- Fetch Actual Road Route from OSRM ---
+                                actual_route_path = None
+                                with st.spinner("Fetching road directions from OSRM demo server..."):
+                                    actual_route_path = get_osrm_route(route_details_df[['Long', 'Lat']]) # Pass only coordinates
+
+                                # --- Prepare PyDeck Layers ---
+                                path_data = None
+                                path_color = [255, 165, 0, 180] # Default: Orange for straight line fallback
+
+                                if actual_route_path:
+                                    st.success("Road directions obtained successfully from OSRM.", icon="✅")
+                                    path_data = pd.DataFrame({'path': [actual_route_path]})
+                                    path_color = [0, 128, 255, 180] # Blue for actual road route
+                                else:
+                                    # Only show warning if OSRM *failed* (not just <2 points)
+                                    if route_details_df.shape[0] >= 2:
+                                        st.info("Could not fetch road directions from OSRM. Displaying straight lines between stops.", icon="〰️")
+                                    # Create straight line path data if OSRM failed or not enough points for OSRM
+                                    straight_line_path = route_details_df[['Long', 'Lat']].values.tolist()
+                                    if len(straight_line_path) >= 2:
+                                        path_data = pd.DataFrame({'path': [straight_line_path]})
+                                    # Path color remains orange (fallback)
+
+                                # Define icon data (URL, size, anchor) - DC is Red, others Blue
+                                def get_icon_data(loc_id):
+                                    is_dc = isinstance(loc_id, str) and loc_id == DC_LOC_ID
+                                    icon_url = DC_PIN_URL if is_dc else STORE_PIN_URL
+                                    # Scale base size slightly for DC vs Store
+                                    icon_width = PIN_WIDTH * 1.2 if is_dc else PIN_WIDTH
+                                    icon_height = PIN_HEIGHT * 1.2 if is_dc else PIN_HEIGHT
+                                    icon_anchor_y = icon_height # Anchor at bottom middle
+                                    # Return dict for IconLayer
+                                    return {
+                                        "url": icon_url,
+                                        "width": int(icon_width), # Ensure int
+                                        "height": int(icon_height), # Ensure int
+                                        "anchorY": int(icon_anchor_y) # Ensure int
+                                        }
+                                route_details_df['icon_data'] = route_details_df['LocID'].apply(get_icon_data)
+
+                                # Define Tooltip Text Conditionally
+                                def get_tooltip_text(row):
+                                    base_info = f"<b>{row['LocName']}</b><br/>Seq: {row['Seq']}<br/>ID: {row['LocID']}<br/>Lat: {row['Lat']:.4f}, Lon: {row['Long']:.4f}"
+                                    if row['LocID'] == DC_LOC_ID:
+                                        return f"<b>Distribution Centre</b><br/>{base_info}"
+                                    else:
+                                         return base_info # No special prefix for stores
+
+                                route_details_df['TooltipText'] = route_details_df.apply(get_tooltip_text, axis=1)
+
+
+                                # --- PyDeck Rendering ---
+                                try:
+                                    initial_view_state = pdk.ViewState(
+                                        latitude=route_details_df['Lat'].mean(),
+                                        longitude=route_details_df['Long'].mean(),
+                                        zoom=11.5, # Adjust zoom as needed
+                                        pitch=45 # Angled view
+                                        )
+                                except Exception: # Fallback if coords are bad
+                                     initial_view_state = pdk.ViewState(latitude=35.1495, longitude=-90.0490, zoom=10, pitch=0) # Default (e.g., Memphis)
+
+                                # Icon Layer
+                                icon_layer = pdk.Layer(
+                                    "IconLayer",
+                                    data=route_details_df,
+                                    get_icon="icon_data", # Use the dict created above
+                                    get_position=["Long", "Lat"],
+                                    size_scale=1, # Use actual pixel size from icon_data
+                                    pickable=True,
+                                    auto_highlight=True,
+                                    highlight_color=[255, 255, 0, 200] # Yellow highlight on hover
+                                )
+
+                                layers_to_render = [icon_layer] # Always show icons
+
+                                # Path Layer (only if path data exists)
+                                if path_data is not None:
+                                    path_layer = pdk.Layer(
+                                        "PathLayer",
+                                        data=path_data,
+                                        get_path="path",
+                                        get_color=path_color,
+                                        width_min_pixels=4, # Make path thicker
+                                        pickable=False # Path isn't usually interactive
+                                        )
+                                    layers_to_render.insert(0, path_layer) # Add path behind icons
+
+                                # Tooltip using the pre-formatted column
+                                tooltip_config = {"html": "{TooltipText}"}
+
+                                # Render the map
+                                route_map = pdk.Deck(
+                                    map_style="mapbox://styles/mapbox/light-v10", # Light theme
+                                    initial_view_state=initial_view_state,
+                                    layers=layers_to_render,
+                                    tooltip=tooltip_config
+                                )
+                                st.pydeck_chart(route_map, use_container_width=True)
+
+                                # --- Route Summary Text ---
+                                st.markdown("---") # Separator
+                                st.subheader("Route Summary")
+                                if not route_details_df.empty:
+                                    summary_items = []
+                                    # Determine start/end points for labeling
+                                    start_loc = route_details_df.iloc[0]
+                                    end_loc = route_details_df.iloc[-1] if len(route_details_df) > 1 else start_loc
+
+                                    # Track stop number (excluding DC if it's the absolute start/end)
+                                    stop_counter = 0
+
+                                    for index, row in route_details_df.iterrows():
+                                        loc_name = row['LocName']
+                                        loc_id = row['LocID']
+                                        seq = row['Seq']
+                                        is_dc = (loc_id == DC_LOC_ID)
+                                        label = ""
+
+                                        # Determine label (Start, End, Stop #)
+                                        if index == 0: # First point
+                                            label = "**Start:** " + ("(DC) " if is_dc else "")
+                                        elif index == len(route_details_df) - 1 and len(route_details_df) > 1 : # Last point (if different from start)
+                                             label = "**End:** " + ("(Return to DC) " if is_dc else "")
+                                        else: # Intermediate stops
+                                             stop_counter += 1
+                                             label = f"**Stop {stop_counter}:** " + ("(DC Visit) " if is_dc else "")
+
+
+                                        summary_items.append(f"* {label}{loc_name} (`{loc_id}`)")
+
+                                    st.markdown("\n".join(summary_items))
+                                else:
+                                     st.markdown("No route points to summarize.")
+
+                                # --- Route Details Table ---
+                                st.markdown("---") # Separator
+                                st.subheader("Route Stop Details")
+                                st.dataframe(
+                                    route_details_df[['Seq', 'LocID', 'LocName', 'Lat', 'Long']],
+                                    use_container_width=True,
+                                    hide_index=True # Cleaner look
+                                    )
+
+        elif selected_week is None:
+            st.info("Please select a week to view route options.", icon="👆")
+        elif selected_rider is None and selected_week is not None :
+             st.info(f"Please select a rider for Week {selected_week} to visualize the route.", icon="👆")
+
+# --- Footer ---
+st.markdown('<p class="footer-caption">Business Operations Dashboard | Data Sources: Local Files & Google BigQuery</p>', unsafe_allow_html=True)
