@@ -1,0 +1,122 @@
+# --- START: Order Management Tab (Simplified + Horizontal Cards using Flexbox) ---
+with tab_orders:
+    # Use the existing tab header style
+    st.markdown('<h2 class="tab-header">Order Overview</h2>', unsafe_allow_html=True)
+
+    # Check if data was loaded and processed successfully
+    # Assume df_orders, df_orders_loaded_successfully, and load_error_message
+    # are available from the preceding 'Order Data Processing' block.
+
+    if not df_orders_loaded_successfully:
+        st.error(f"Error loading or processing order data from `{ORDER_EXCEL_PATH}`.", icon="🚨")
+        if 'load_error_message' in locals() and load_error_message: # Check if variable exists and is not empty
+             st.error(f"Details: {load_error_message}")
+        st.caption(f"Please ensure the file exists, is accessible, and contains valid data (especially 'Order Status', 'Total Price (USD)').")
+
+    elif df_orders is None or df_orders.empty: # Handle case where loading succeeded but df is None or empty
+         st.warning(f"Order Management file (`{os.path.basename(ORDER_EXCEL_PATH)}`) loaded but is empty or contains no valid orders after processing.", icon="📄")
+
+    else: # Data loaded successfully and is not empty
+
+        # --- Display Metrics based on the *Full* Dataset ---
+        st.markdown("<h4>Order Summary (Full Dataset)</h4>", unsafe_allow_html=True)
+
+        # Calculate Metrics directly from df_orders
+        total_orders = len(df_orders)
+
+        total_order_value = 0
+        if 'Total Price (USD)' in df_orders.columns:
+             total_order_value = df_orders['Total Price (USD)'].sum()
+        else:
+            st.caption("Metric 'Total Value' unavailable (missing 'Total Price (USD)' column).")
+
+
+        # Calculate status counts only if 'Order Status' column exists
+        shipped_orders = 0
+        delivered_orders = 0
+        pending_orders = 0
+        processing_orders = 0
+        status_metrics_available = False
+        if 'Order Status' in df_orders.columns:
+            status_counts = df_orders['Order Status'].value_counts()
+            shipped_orders = status_counts.get('Shipped', 0)
+            delivered_orders = status_counts.get('Delivered', 0)
+            pending_orders = status_counts.get('Pending', 0)
+            processing_orders = status_counts.get('Processing', 0)
+            status_metrics_available = True
+        else:
+            st.caption("Status metrics unavailable (missing 'Order Status' column).")
+
+
+        # --- Display Cards Horizontally using card-container flexbox ---
+        # The .card-container CSS (display: flex, flex-wrap: wrap, gap: ...)
+        # will arrange the cards horizontally.
+        st.markdown('<div class="card-container">', unsafe_allow_html=True)
+
+        # Card 1: Total Orders
+        # Each card is its own div with the appropriate class
+        st.markdown(f"""
+            <div class="info-card">
+                <span class="card-label">Total Orders</span>
+                <span class="card-value">{total_orders}</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Card 2: Total Value (Only if column exists)
+        if 'Total Price (USD)' in df_orders.columns:
+            st.markdown(f"""
+                <div class="success-card">
+                    <span class="card-label">Total Value (USD)</span>
+                    <span class="card-value">${total_order_value:,.2f}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+        # Display Status Cards only if status metrics are available
+        if status_metrics_available:
+            # Card 3: Shipped Orders
+            st.markdown(f"""
+                <div class="secondary-card">
+                    <span class="card-label">Shipped</span>
+                    <span class="card-value">{shipped_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Card 4: Delivered Orders
+            st.markdown(f"""
+                <div class="success-card">
+                    <span class="card-label">Delivered</span>
+                    <span class="card-value">{delivered_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Card 5: Pending Orders
+            st.markdown(f"""
+                <div class="warning-card">
+                    <span class="card-label">Pending</span>
+                    <span class="card-value">{pending_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+            # Card 6: Processing Orders
+            st.markdown(f"""
+                <div class="danger-card">
+                    <span class="card-label">Processing</span>
+                    <span class="card-value">{processing_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+        # Close the container div AFTER all cards have been added
+        st.markdown('</div>', unsafe_allow_html=True)
+
+
+        # --- Display Full Dataframe ---
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True) # Divider
+        st.markdown("<h4>All Order Details</h4>", unsafe_allow_html=True)
+
+        # Display the entire processed dataframe
+        st.dataframe(df_orders, use_container_width=True, hide_index=True)
+
+        # --- Footer Caption for this section ---
+        st.caption(f"Data loaded from: `{os.path.basename(ORDER_EXCEL_PATH)}` | Total Valid Records Shown: {len(df_orders)}")
+
+# --- END: Order Management Tab (Simplified + Horizontal Cards using Flexbox) ---
