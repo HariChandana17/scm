@@ -49,64 +49,20 @@ with tab_orders:
 
 
         # --- Display Cards Horizontally using card-container flexbox ---
-        # The .card-container CSS (display: flex, flex-wrap: wrap, gap: ...)
-        # will arrange the cards horizontally.
-        st.markdown('<div class="card-container">', unsafe_allow_html=True)
-
-        # Card 1: Total Orders
-        # Each card is its own div with the appropriate class
-        st.markdown(f"""
-            <div class="info-card">
-                <span class="card-label">Total Orders</span>
-                <span class="card-value">{total_orders}</span>
-            </div>
-        """, unsafe_allow_html=True)
-
-        # Card 2: Total Value (Only if column exists)
-        if 'Total Price (USD)' in df_orders.columns:
-            st.markdown(f"""
-                <div class="success-card">
-                    <span class="card-label">Total Value (USD)</span>
-                    <span class="card-value">${total_order_value:,.2f}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-        # Display Status Cards only if status metrics are available
-        if status_metrics_available:
-            # Card 3: Shipped Orders
-            st.markdown(f"""
-                <div class="secondary-card">
-                    <span class="card-label">Shipped</span>
-                    <span class="card-value">{shipped_orders}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # Card 4: Delivered Orders
-            st.markdown(f"""
-                <div class="success-card">
-                    <span class="card-label">Delivered</span>
-                    <span class="card-value">{delivered_orders}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # Card 5: Pending Orders
-            st.markdown(f"""
-                <div class="warning-card">
-                    <span class="card-label">Pending</span>
-                    <span class="card-value">{pending_orders}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # Card 6: Processing Orders
-            st.markdown(f"""
-                <div class="danger-card">
-                    <span class="card-label">Processing</span>
-                    <span class="card-value">{processing_orders}</span>
-                </div>
-            """, unsafe_allow_html=True)
-
-        # Close the container div AFTER all cards have been added
-        st.markdown('</div>', unsafe_allow_html=True)
+        Display Cards Horizontally using st.columns and custom CSS ---
+                st.markdown('<div class="card-container">', unsafe_allow_html=True)
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.markdown(f'<div class="info-card"><span class="card-label">Total Orders</span><span class="card-value">{total_orders}</span></div>', unsafe_allow_html=True)
+                with col2:
+                     st.markdown(f'<div class="success-card"><span class="card-label">Delivered</span><span class="card-value">{delivered_orders}</span></div>', unsafe_allow_html=True)
+                with col3:
+                     st.markdown(f'<div class="neutral-card"><span class="card-label">Pending</span><span class="card-value">{pending_orders}</span></div>', unsafe_allow_html=True)
+                with col4:
+                    st.markdown(f'<div class="success-card"><span class="card-label">Total Value (USD)</span><span class="card-value">${total_order_value:,.2f}</span></div>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True) # Close card-container
+        
+                st.markdown("<br>", unsafe_allow_html=True) # Add some space before legend
 
 
         # --- Display Full Dataframe ---
