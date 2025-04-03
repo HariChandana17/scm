@@ -836,216 +836,121 @@ with tab_inventory:
 
 
 # --- START: Order Management Tab ---
+# --- START: Order Management Tab (Simplified) ---
 with tab_orders:
-    st.markdown('<h2 class="tab-header">Order Management Dashboard</h2>', unsafe_allow_html=True)
+    # Use the existing tab header style
+    st.markdown('<h2 class="tab-header">Order Overview</h2>', unsafe_allow_html=True)
 
+    # Check if data was loaded and processed successfully
     if not df_orders_loaded_successfully:
         st.error(f"Error loading or processing order data from `{ORDER_EXCEL_PATH}`.", icon="🚨")
         if load_error_message:
              st.error(f"Details: {load_error_message}")
-        st.caption(f"Please ensure the file exists, is accessible, and contains valid data (especially 'Order Date', 'Order Status', 'Product Name', 'Total Price (USD)').")
+        st.caption(f"Please ensure the file exists, is accessible, and contains valid data (especially 'Order Status', 'Total Price (USD)').")
 
     elif df_orders is None or df_orders.empty: # Handle case where loading succeeded but df is None or empty
          st.warning(f"Order Management file (`{os.path.basename(ORDER_EXCEL_PATH)}`) loaded but is empty or contains no valid orders after processing.", icon="📄")
 
     else: # Data loaded successfully and is not empty
-        # --- Filter Section ---
-        st.markdown('<div class="filter-section">', unsafe_allow_html=True)
-        st.markdown("<h4>Filter Orders</h4>", unsafe_allow_html=True)
 
-        # Check if necessary columns exist before creating filters
-        can_filter_status = 'Order Status' in df_orders.columns
-        can_filter_product = 'Product Name' in df_orders.columns
-        can_filter_date = 'Order Date' in df_orders.columns and not df_orders['Order Date'].isnull().all()
+        # --- Display Metrics based on the *Full* Dataset ---
+        st.markdown("<h4>Order Summary (Full Dataset)</h4>", unsafe_allow_html=True)
 
-        # Use columns for layout
-        filter_cols = st.columns([2, 2, 1]) # Adjust ratios as needed
+        # Calculate Metrics directly from df_orders
+        total_orders = len(df_orders)
 
-        selected_statuses = []
-        if can_filter_status:
-            with filter_cols[0]:
-                unique_statuses = sorted(df_orders['Order Status'].dropna().unique())
-                selected_statuses = st.multiselect(
-                    "Filter by Order Status:",
-                    options=unique_statuses,
-                    default=unique_statuses # Default to all selected
-                )
+        total_order_value = 0
+        if 'Total Price (USD)' in df_orders.columns:
+             total_order_value = df_orders['Total Price (USD)'].sum()
         else:
-             with filter_cols[0]:
-                 st.caption("Status filter unavailable (missing 'Order Status' column).")
+            st.caption("Metric 'Total Value' unavailable (missing 'Total Price (USD)' column).")
 
-        selected_products = []
-        if can_filter_product:
-            with filter_cols[1]:
-                unique_products = sorted(df_orders['Product Name'].dropna().unique())
-                selected_products = st.multiselect(
-                    "Filter by Product Name:",
-                    options=unique_products,
-                    default=unique_products # Default to all selected
-                )
+
+        # Calculate status counts only if 'Order Status' column exists
+        shipped_orders = 0
+        delivered_orders = 0
+        pending_orders = 0
+        processing_orders = 0
+        status_metrics_available = False
+        if 'Order Status' in df_orders.columns:
+            status_counts = df_orders['Order Status'].value_counts()
+            shipped_orders = status_counts.get('Shipped', 0)
+            delivered_orders = status_counts.get('Delivered', 0)
+            pending_orders = status_counts.get('Pending', 0)
+            processing_orders = status_counts.get('Processing', 0)
+            status_metrics_available = True
         else:
-            with filter_cols[1]:
-                st.caption("Product filter unavailable (missing 'Product Name' column).")
-
-        selected_date_range = (None, None)
-        if can_filter_date:
-            with filter_cols[2]:
-                 min_date = df_orders['Order Date'].min().date()
-                 max_date = df_orders['Order Date'].max().date()
-
-                 selected_date_range = st.date_input(
-                     "Filter by Order Date Range:",
-                     value=(min_date, max_date), # Default range
-                     min_value=min_date,
-                     max_value=max_date,
-                     key="order_date_range" # Unique key
-                 )
-                 # Ensure we have two dates selected
-                 if len(selected_date_range) != 2:
-                     st.caption("Select start & end date.")
-                     # Default back to full range if selection is incomplete mid-interaction
-                     selected_date_range = (min_date, max_date)
-        else:
-             with filter_cols[2]:
-                 st.caption("Date filter unavailable (missing or invalid 'Order Date' column).")
-
-        st.markdown('</div>', unsafe_allow_html=True) # End filter-section
-
-        # --- Apply Filters ---
-        # Start with the full processed dataframe
-        df_filtered = df_orders.copy() # Use .copy()
-
-        # Apply filters conditionally based on availability and selection
-        if can_filter_status and selected_statuses:
-             df_filtered = df_filtered[df_filtered['Order Status'].isin(selected_statuses)]
-        if can_filter_product and selected_products:
-             df_filtered = df_filtered[df_filtered['Product Name'].isin(selected_products)]
-        if can_filter_date and selected_date_range[0] is not None and selected_date_range[1] is not None:
-             start_date, end_date = selected_date_range
-             # Convert selected dates back to datetime objects for comparison
-             start_datetime = pd.to_datetime(start_date)
-             # Add 1 day to end_date and make it exclusive, or compare <= end_datetime
-             end_datetime = pd.to_datetime(end_date) # Inclusive comparison
-             df_filtered = df_filtered[
-                 (df_filtered['Order Date'] >= start_datetime) &
-                 (df_filtered['Order Date'] <= end_datetime)
-             ]
-
-        # --- Display Metrics based on Filtered Data ---
-        if not df_filtered.empty:
-            st.markdown("<h4>Order Summary (Filtered)</h4>", unsafe_allow_html=True)
-
-            # Calculate Metrics - check if columns exist before calculating
-            total_filtered_orders = len(df_filtered)
-
-            total_order_value = 0
-            if 'Total Price (USD)' in df_filtered.columns:
-                 total_order_value = df_filtered['Total Price (USD)'].sum()
-
-            shipped_orders = 0
-            delivered_orders = 0
-            pending_orders = 0
-            processing_orders = 0
-            if 'Order Status' in df_filtered.columns:
-                status_counts = df_filtered['Order Status'].value_counts()
-                shipped_orders = status_counts.get('Shipped', 0)
-                delivered_orders = status_counts.get('Delivered', 0)
-                pending_orders = status_counts.get('Pending', 0)
-                processing_orders = status_counts.get('Processing', 0)
+            st.caption("Status metrics unavailable (missing 'Order Status' column).")
 
 
-            # --- Display Cards ---
-            # Using existing CSS classes: info-card, success-card, warning-card, danger-card, secondary-card
-            st.markdown('<div class="card-container">', unsafe_allow_html=True)
+        # --- Display Cards Horizontally ---
+        # The .card-container CSS with display:flex handles the horizontal layout
+        st.markdown('<div class="card-container">', unsafe_allow_html=True)
 
-            # Card 1: Total Orders
+        # Card 1: Total Orders
+        st.markdown(f"""
+            <div class="info-card">
+                <span class="card-label">Total Orders</span>
+                <span class="card-value">{total_orders}</span>
+            </div>
+        """, unsafe_allow_html=True)
+
+        # Card 2: Total Value (Only if column exists)
+        if 'Total Price (USD)' in df_orders.columns:
             st.markdown(f"""
-                <div class="info-card">
-                    <span class="card-label">Total Orders</span>
-                    <span class="card-value">{total_filtered_orders}</span>
+                <div class="success-card">
+                    <span class="card-label">Total Value (USD)</span>
+                    <span class="card-value">${total_order_value:,.2f}</span>
                 </div>
             """, unsafe_allow_html=True)
 
-            # Card 2: Total Value (Only if column exists)
-            if 'Total Price (USD)' in df_filtered.columns:
-                st.markdown(f"""
-                    <div class="success-card">
-                        <span class="card-label">Total Value (USD)</span>
-                        <span class="card-value">${total_order_value:,.2f}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+        # Display Status Cards only if status metrics are available
+        if status_metrics_available:
+            # Card 3: Shipped Orders
+            st.markdown(f"""
+                <div class="secondary-card">
+                    <span class="card-label">Shipped</span>
+                    <span class="card-value">{shipped_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
-            # Card 3: Shipped Orders (Only if status exists)
-            if 'Order Status' in df_filtered.columns:
-                st.markdown(f"""
-                    <div class="secondary-card">
-                        <span class="card-label">Shipped</span>
-                        <span class="card-value">{shipped_orders}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+            # Card 4: Delivered Orders
+            st.markdown(f"""
+                <div class="success-card">
+                    <span class="card-label">Delivered</span>
+                    <span class="card-value">{delivered_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
-                # Card 4: Delivered Orders
-                st.markdown(f"""
-                    <div class="success-card">
-                        <span class="card-label">Delivered</span>
-                        <span class="card-value">{delivered_orders}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+            # Card 5: Pending Orders
+            st.markdown(f"""
+                <div class="warning-card">
+                    <span class="card-label">Pending</span>
+                    <span class="card-value">{pending_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
-                # Card 5: Pending Orders
-                st.markdown(f"""
-                    <div class="warning-card">
-                        <span class="card-label">Pending</span>
-                        <span class="card-value">{pending_orders}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+            # Card 6: Processing Orders
+            st.markdown(f"""
+                <div class="danger-card">
+                    <span class="card-label">Processing</span>
+                    <span class="card-value">{processing_orders}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
-                # Card 6: Processing Orders
-                st.markdown(f"""
-                    <div class="danger-card">
-                        <span class="card-label">Processing</span>
-                        <span class="card-value">{processing_orders}</span>
-                    </div>
-                """, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True) # End card-container
 
-            st.markdown('</div>', unsafe_allow_html=True) # End card-container
+        # --- Display Full Dataframe ---
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True) # Divider
+        st.markdown("<h4>All Order Details</h4>", unsafe_allow_html=True)
 
-            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True) # Divider
+        # Display the entire processed dataframe
+        st.dataframe(df_orders, use_container_width=True, hide_index=True)
 
-            # --- Display Filtered Dataframe ---
-            st.markdown("<h4>Filtered Order Details</h4>", unsafe_allow_html=True)
-            # Optionally hide columns that might be less relevant after filtering
-            cols_to_display = [col for col in df_orders.columns if col in df_filtered.columns] # Ensure columns exist
-            st.dataframe(df_filtered[cols_to_display], use_container_width=True, hide_index=True)
+        # --- Footer Caption for this section ---
+        st.caption(f"Data loaded from: `{os.path.basename(ORDER_EXCEL_PATH)}` | Total Valid Records Shown: {len(df_orders)}")
 
-            # --- Download Button ---
-            # Function to convert df to csv
-            @st.cache_data # Cache the conversion
-            def convert_df_to_csv(df):
-                return df.to_csv(index=False).encode('utf-8')
-
-            csv_data = convert_df_to_csv(df_filtered)
-            # Generate dynamic filename based on filters
-            filename_parts = ["filtered_orders"]
-            if can_filter_date and selected_date_range[0] is not None:
-                filename_parts.append(f"{selected_date_range[0].strftime('%Y%m%d')}_to_{selected_date_range[1].strftime('%Y%m%d')}")
-            if can_filter_status and len(selected_statuses) < len(df_orders['Order Status'].unique()):
-                 filename_parts.append("custom_status")
-            if can_filter_product and len(selected_products) < len(df_orders['Product Name'].unique()):
-                 filename_parts.append("custom_product")
-
-            st.download_button(
-               label="📥 Download Filtered Data (.csv)",
-               data=csv_data,
-               file_name=f"{'_'.join(filename_parts)}.csv",
-               mime='text/csv',
-            )
-
-        else: # Filtered resulted in empty dataframe
-             st.info("No orders match the selected filter criteria.", icon="ℹ️")
-
-        # Display original file source regardless of filtering
-        st.caption(f"Full dataset source: `{os.path.basename(ORDER_EXCEL_PATH)}` | Total Valid Records: {len(df_orders)}")
+# --- END: Order Management Tab (Simplified) ---
 # --- END: Order Management Tab ---
 
 
