@@ -1,0 +1,12 @@
+# requirements.txt
+
+streamlit
+pandas
+pydeck
+google-cloud-bigquery
+google-cloud-bigquery-storage # Recommended for optimized BigQuery to_dataframe()
+db-dtypes # Recommended for handling specific BigQuery types in Pandas
+numpy # Often a dependency of pandas, but good to list if used directly
+openpyxl # Required by pandas for reading .xlsx files
+# google-auth is usually installed as a dependency of google-cloud-bigquery
+polyline
