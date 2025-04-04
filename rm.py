@@ -1,4 +1,4 @@
-# --- START: Rider Route Tab Block (Hiding TooltipName from final table) ---
+# --- START: Rider Route Tab Block (Corrected Merge for String LocID) ---
 with tab_route:
     st.markdown('<h2 class="tab-header">Rider Route Visualization</h2>', unsafe_allow_html=True)
 
@@ -47,46 +47,64 @@ with tab_route:
         if selected_week is not None and selected_rider:
             st.markdown(f"#### Route Map: Week {selected_week}, Rider {selected_rider}")
             with st.spinner(f"Loading route for W{selected_week}, R{selected_rider}..."):
+                # Assuming get_route_data returns 'LocID' as string
                 rider_route_df = get_route_data(bq_client, selected_week, selected_rider)
 
             if rider_route_df.empty or 'LocID' not in rider_route_df.columns:
                 st.warning("No route sequence data found for this selection.", icon="📍")
             else:
-                unique_loc_ids = rider_route_df['LocID'].dropna().unique().tolist()
+                # Ensure unique_loc_ids are strings before fetching location data
+                unique_loc_ids = rider_route_df['LocID'].dropna().astype(str).unique().tolist()
                 if not unique_loc_ids:
                     st.warning("Route data exists but contains no valid Location IDs.", icon="🤨")
                 else:
                     with st.spinner("Loading location details..."):
-                         locations_df = get_location_data(bq_client, [str(loc) for loc in unique_loc_ids])
+                         # Assuming get_location_data also returns 'LocID' as string
+                         # The function already handles converting list items to string for the query parameter
+                         locations_df = get_location_data(bq_client, unique_loc_ids)
 
                     if locations_df.empty:
                         st.error(f"Could not find location details for the route stops.", icon="❌")
                     else:
-                        # Merge route sequence with location coordinates
-                        rider_route_df['LocID_str'] = rider_route_df['LocID'].astype(str)
-                        locations_df['LocID_str'] = locations_df['LocID'].astype(str)
-                        route_details_df = pd.merge(
-                            rider_route_df.sort_values(by='Seq'), locations_df,
-                            on='LocID_str', how='left'
-                        ).drop(columns=['LocID_str'])
+                        # ------------------------------------------------------------------
+                        # --- START: CHANGE - Simplified Merge on 'LocID' ---
+                        # ------------------------------------------------------------------
+                        # Ensure 'LocID' is string type in both DFs just before merge for safety,
+                        # although they should be already if fetched correctly.
+                        rider_route_df['LocID'] = rider_route_df['LocID'].astype(str)
+                        locations_df['LocID'] = locations_df['LocID'].astype(str)
 
-                        # Check for missing coordinates
+                        # Merge directly on the 'LocID' column
+                        route_details_df = pd.merge(
+                            rider_route_df.sort_values(by='Seq'), # Ensure route is sorted
+                            locations_df,
+                            on='LocID', # Merge directly on the LocID column
+                            how='left'  # Keep all sequences from route, add location info
+                        )
+                        # No need to drop 'LocID_str' anymore
+                        # ------------------------------------------------------------------
+                        # --- END: CHANGE ---
+                        # ------------------------------------------------------------------
+
+                        # Check for missing coordinates after merge (if merge failed for some LocIDs)
                         missing_coords = route_details_df['Lat'].isnull().sum() + route_details_df['Long'].isnull().sum()
                         if missing_coords > 0:
-                             st.warning(f"{missing_coords // 2} locations in the route are missing coordinates.", icon="⚠️")
+                             st.warning(f"{missing_coords // 2} locations in the route could not be matched with coordinates or are missing coordinates.", icon="⚠️")
                              route_details_df.dropna(subset=['Lat', 'Long'], inplace=True)
 
                         if route_details_df.empty:
                              st.warning("No locations with valid coordinates found for this route.", icon="🙁")
                         else:
                             # --- Add Custom Tooltip Name Column ---
-                            # (Logic remains the same, requires DC_LOC_ID = '0' defined above)
+                            # (Logic remains the same, relies on DC_LOC_ID = '0' defined above)
                             first_seq_is_dc = False
                             if not route_details_df.empty:
+                                 # Access 'LocID' directly, convert to str for comparison
                                  first_loc_id = str(route_details_df.iloc[0]['LocID'])
                                  if first_loc_id == DC_LOC_ID: first_seq_is_dc = True
 
                             def get_tooltip_display_name(row, dc_id, first_is_dc):
+                                # Access 'LocID' directly, convert to str for comparison
                                 loc_id_str = str(row['LocID'])
                                 seq = row['Seq']
                                 if loc_id_str == dc_id: return "Distribution Center"
@@ -117,10 +135,11 @@ with tab_route:
                                 st.info("Only one valid point, cannot draw a path.")
 
                             # --- Define Icon Data ---
-                            # (Logic remains the same, requires DC_LOC_ID = '0')
+                            # (Logic remains the same, relies on DC_LOC_ID = '0')
                             def get_icon_data(loc_id, seq, max_seq):
+                                # Convert to string for comparison, using the original LocID
                                 loc_id_str = str(loc_id)
-                                is_dc = (loc_id_str == DC_LOC_ID)
+                                is_dc = (loc_id_str == DC_LOC_ID) # Compare with corrected DC_LOC_ID = '0'
                                 is_start = (seq == route_details_df['Seq'].min())
                                 is_end = (seq == max_seq)
                                 icon_url = DC_PIN_URL if is_dc else STORE_PIN_URL
@@ -129,6 +148,7 @@ with tab_route:
                                         "height": int(PIN_HEIGHT * size_multiplier),
                                         "anchorY": int(PIN_HEIGHT * size_multiplier * PIN_ANCHOR_Y_FACTOR)}
                             max_sequence = route_details_df['Seq'].max()
+                            # Apply using the original 'LocID' column
                             route_details_df['icon_data'] = route_details_df.apply(
                                 lambda row: get_icon_data(row['LocID'], row['Seq'], max_sequence), axis=1)
 
@@ -158,7 +178,7 @@ with tab_route:
                                 <div style='background-color: rgba(0,0,0,0.7); color: white; padding: 8px 12px; border-radius: 5px; font-family: sans-serif; font-size: 0.9em;'>
                                     <b>{TooltipName}</b><br/>
                                     Stop #: {Seq}<br/>
-                                    ID: {LocID}<br/>
+                                    ID: {LocID}<br/> <!-- Accessing the original LocID -->
                                     Original Name: {LocName}<br/>
                                     Coords: {Lat:.4f}, {Long:.4f}
                                 </div>""",
@@ -172,16 +192,18 @@ with tab_route:
                             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
                             # --- Route Summary Text ---
-                            # (Logic remains the same)
+                            # (Logic remains the same, uses str(loc_id) for comparison)
                             st.subheader("Route Summary")
                             summary_items = []
+                            # Use str() for comparison
                             first_loc_id_summary = str(route_details_df.iloc[0]['LocID']) if not route_details_df.empty else None
                             for index, row in route_details_df.iterrows():
                                 loc_name = row['LocName']
-                                loc_id = row['LocID']
+                                loc_id = row['LocID'] # Get original LocID
                                 seq = row['Seq']
                                 prefix = ""
                                 icon = "📍"
+                                # Use str() for comparison
                                 if seq == route_details_df['Seq'].min() and str(loc_id) == DC_LOC_ID:
                                     prefix = f"**Start (DC):** "; icon = "🏭"
                                 elif seq == route_details_df['Seq'].max() and str(loc_id) == DC_LOC_ID and seq != route_details_df['Seq'].min():
@@ -194,25 +216,20 @@ with tab_route:
                                 else:
                                     stop_num = seq - 1 if first_loc_id_summary == DC_LOC_ID else seq
                                     prefix = f"**Stop {stop_num}:** "
-                                summary_items.append(f"* {icon} {prefix} {loc_name} (`{loc_id}`)")
+                                summary_items.append(f"* {icon} {prefix} {loc_name} (`{loc_id}`)") # Display original LocID
                             st.markdown("\n".join(summary_items))
 
                             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
                             # --- Route Details Table ---
                             st.markdown("#### Route Stop Details")
-                            # ------------------------------------------------------------------
-                            # --- START: CHANGE - Remove 'TooltipName' from display list ---
-                            # ------------------------------------------------------------------
-                            display_cols = ['Seq', 'LocID', 'LocName', 'Lat', 'Long'] # Removed 'TooltipName'
-                            # ------------------------------------------------------------------
-                            # --- END: CHANGE ---
-                            # ------------------------------------------------------------------
+                            # Display original 'LocID', not 'TooltipName'
+                            display_cols = ['Seq', 'LocID', 'LocName', 'Lat', 'Long']
                             display_cols_exist = [col for col in display_cols if col in route_details_df.columns]
                             st.dataframe(
                                 route_details_df[display_cols_exist].reset_index(drop=True),
                                 use_container_width=True,
-                                hide_index=True # Cleaner look
+                                hide_index=True
                                 )
 
         elif selected_week is None or selected_rider is None:
