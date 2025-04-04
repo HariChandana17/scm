@@ -10,3 +10,4 @@ numpy # Often a dependency of pandas, but good to list if used directly
 openpyxl # Required by pandas for reading .xlsx files
 # google-auth is usually installed as a dependency of google-cloud-bigquery
 polyline
+requests
