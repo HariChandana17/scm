@@ -1,0 +1,513 @@
+import streamlit as st
+import pandas as pd
+import pydeck as pdk
+from google.cloud import bigquery
+from google.oauth2 import service_account
+import os
+import numpy as np
+import sys
+import requests # Import for OSRM API calls
+import polyline # Import for decoding polyline geometries
+import traceback # For better error details
+
+
+# --- Try Importing Necessary Libraries ---
+try:
+    import openpyxl
+except ImportError as e:
+    missing_lib = str(e).split("'")[-2]
+    st.error(f"Error: Missing required library '{missing_lib}'.")
+    st.info("Please install required libraries: pip install pandas openpyxl google-cloud-bigquery pydeck db-dtypes requests polyline")
+    st.stop()
+
+
+# --- Page Configuration - MUST BE THE FIRST STREAMLIT COMMAND ---
+st.set_page_config(
+    page_title="Supply Chain Operations Hub",
+    page_icon="🚚", # Changed icon
+    layout="wide"
+)
+
+# ==============================================================================
+# !!! START: Add HCLTech Header/Footer Code !!!
+# ==============================================================================
+
+# --- HCLTech Custom CSS ---
+# Suppress the hamburger menu and default footer
+custom_css = """
+<style>
+.st-emotion-cache-1r4qj8v{background-color: rgb(239 239 239);}
+.stAppHeader{ display:none;}
+.st-emotion-cache-yw8pof{ max-width:1024px !important; padding:0 12px 80px !important; margin:0 auto; }
+.st-emotion-cache-0{min-height : 100vh; }
+.st-emotion-cache-1104ytp h1{ font-size:28px !important; font-weight:normal;}
+.stVerticalBlock.st-emotion-cache-1isgx0k.eiemyj3,
+.stElementContainer.element-container.st-emotion-cache-1v6sb1a.eiemyj1,
+.stMarkdown{ width:100% !important;}
+.st-emotion-cache-1104ytp.e121c1cl0 > div,
+.stFileUploader { max-width:1000px !important;width:100% !important; margin:0 auto;}
+/* Hide default Streamlit elements */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;} /* Hides default footer, allows custom one */
+
+/* Custom Header */
+.header {
+    background: linear-gradient(90deg, #0044cc, #007bff);
+    color: white;
+    padding: 15px 20px;
+    font-size: 25px;
+    font-weight: regular;
+    width: 1024px;
+    text-align: left;
+    border-bottom: 2px solid #ccc;
+    box-sizing: border-box;
+    /* Adjust margins to fit within the Streamlit structure if needed */
+    /* Example: margin: -16px auto 0; /* Centers and pulls up */
+    margin: -16px -11px 0; /* From your original code */
+    /* Ensure it stays within viewport width */
+    max-width: 100%;
+
+}
+.header img{ margin-right:5px; vertical-align: middle;} /* Added vertical align */
+
+/* Custom Footer */
+.footer {
+    background-color: #f8f9fa;
+    color: #333;
+    padding: 15px 20px;
+    font-size: 14px;
+    width: 100%;
+    max-width:1024px;
+    border-top: 2px solid #ccc;
+    box-sizing: border-box;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: fixed;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%); /* Better centering method */
+    /* margin-left:-514px; /* Replaced by transform */
+    visibility:visible !important; /* Ensure visibility */
+    z-index: 9999; /* Ensure it's above other elements */
+}
+.footer img{ vertical-align: middle; height: 20px; margin-right: 5px;} /* Control footer image size */
+</style>
+"""
+
+# --- HCLTech Image Conversion Function ---
+def convert_image_base64(image_path):
+    """Return a base64 encoded string of an image from the local file system"""
+    try:
+        with open(image_path, "rb") as image_file: # Open in binary mode 'rb'
+            encoded_string = base64.b64encode(image_file.read()).decode()
+            # Simple check for image type based on extension
+            if image_path.lower().endswith(".png"):
+                mime_type = "image/png"
+            elif image_path.lower().endswith((".jpg", ".jpeg")):
+                mime_type = "image/jpeg"
+            elif image_path.lower().endswith(".gif"):
+                mime_type = "image/gif"
+            elif image_path.lower().endswith(".svg"):
+                mime_type = "image/svg+xml"
+            else:
+                 mime_type = "image/png" # Default to PNG
+            data_url = f"data:{mime_type};base64,{encoded_string}"
+            return data_url
+    except FileNotFoundError:
+        st.error(f"Header/Footer Image Error: File not found at '{image_path}'. Please ensure it exists.", icon="🖼️")
+        return None # Return None if file not found
+    except Exception as e:
+        st.error(f"Error encoding image '{image_path}': {e}", icon="⚙️")
+        return None
+
+# --- Apply HCLTech Custom CSS ---
+# Apply custom CSS FIRST to hide default elements
+st.markdown(custom_css, unsafe_allow_html=True)
+
+# --- Render HCLTech Custom Header ---
+# NOTE: Ensure 'logo_header.png' exists in the script's directory or provide the correct path
+header_logo_url = convert_image_base64("logo_header.png")
+if header_logo_url: # Only render if image loaded successfully
+    st.markdown(
+        f"""
+        <header class="header">
+            <img alt="hcl_logo" src="{header_logo_url}" /> |  Supply Chain Intelligence Hub
+        </header>
+        <div style="margin-top: 60px;"></div> <!-- Add space below fixed header -->
+        """,
+        unsafe_allow_html=True,
+    )
+else:
+    # Fallback text header if image fails
+    st.markdown(
+        """
+        <header class="header">
+            HCLTech | Supply Chain Intelligence Hub
+        </header>
+        <div style="margin-top: 60px;"></div> <!-- Add space below fixed header -->
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ==============================================================================
+# !!! END: Add HCLTech Header/Footer Code !!!
+# ==============================================================================
+
+
+# ==============================================================================
+# Configuration Constants
+# ==============================================================================
+
+# --- File Paths (Ensure these are correct for your environment) ---
+# Using relative paths or environment variables is generally safer than absolute paths.
+# For demonstration, keeping the provided absolute paths. Replace if needed.
+INVENTORY_EXCEL_PATH = r"C:\Users\revanthvenkat.bhuva\Desktop\browser_use\supply_chain_management\product_data.xlsx"
+ORDER_EXCEL_PATH = r"C:\Users\revanthvenkat.bhuva\Desktop\browser_use\Order Management.xlsx"
+HISTORY_CSV_PATH = r"C:\Users\revanthvenkat.bhuva\Desktop\browser_use\supply_chain_management\Historical Product Demand.csv"
+
+# --- BigQuery Configuration ---
+# !!! IMPORTANT: Replace with your actual Google Cloud Project ID !!!
+GCP_PROJECT_ID = "gebu-data-ml-day0-01-333910" # <<< REPLACE WITH YOUR GCP PROJECT ID
+BQ_DATASET = "supply_chain"
+BQ_FORECAST_DATASET = "demand_forecast" # Dataset for forecasts
+BQ_LOCATIONS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.locations"
+BQ_ROUTES_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.routes"
+# !!! UPDATE with your forecast table name !!! Use the full ID format
+BQ_FORECAST_TABLE_ID = f"{GCP_PROJECT_ID}.{BQ_FORECAST_DATASET}.forecast1" # <<< UPDATE THIS
+
+# --- PyDeck Icon Configuration for Route Map ---
+DC_PIN_URL = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png" # Using 2x for better resolution
+STORE_PIN_URL = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png"
+PIN_WIDTH = 25 # Base width
+PIN_HEIGHT = 41 # Base height
+PIN_ANCHOR_Y_FACTOR = 1.0 # Anchor at the bottom
+
+# Assuming DC LocID is exactly 'LOC0'
+DC_LOC_ID = 'LOC0'
+
+# ==============================================================================
+# Enhanced Styling (Your Original App Styling)
+# ==============================================================================
+
+APP_STYLE = """
+<style>
+    /* --- Base & Font --- */
+    body {
+        font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; /* Modern font stack */
+        /* background-color: #f0f4f8; /* Light grey-blue background - Might be overridden by HCL CSS */
+        color: #333; /* Default text color */
+        padding-top: 70px; /* Add padding to prevent overlap with fixed HCL header */
+        padding-bottom: 70px; /* Add padding to prevent overlap with fixed HCL footer */
+    }
+
+    /* --- Custom Main Header (Replaces .main-header/.main-title) --- */
+    /* This is the internal title header, not the main page header */
+    .custom-header-container {
+        background-color: #ffffff; /* White background for contrast */
+        padding: 1.5rem 2rem;
+        border-radius: 10px;
+        border-left: 6px solid #1a73e8; /* Accent color border (Google Blue) */
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); /* Subtle shadow */
+    }
+    .custom-header-container h1 {
+        color: #0d47a1; /* Darker blue */
+        margin-bottom: 0.5rem;
+        font-size: 2.1em; /* Adjusted size */
+        font-weight: 700; /* Bolder */
+        display: flex;
+        align-items: center;
+    }
+    .custom-header-container h1 img {
+        margin-right: 15px; /* Space between icon and text */
+        height: 45px; /* Control icon size */
+        vertical-align: middle; /* Align icon vertically */
+    }
+    .custom-header-container p {
+        color: #455a64; /* Darker grey text */
+        font-size: 1.05rem; /* Slightly larger subtitle */
+        margin-bottom: 0;
+        line-height: 1.5;
+    }
+
+    /* --- Enhanced Tab Styling --- */
+    div[data-testid="stTabs"] { /* Target the main tabs container */
+        border-bottom: 2px solid #cbd5e1; /* Add a separating line below tabs */
+        margin-bottom: 0; /* Remove bottom margin, panel styling will handle space */
+    }
+
+    div[data-testid="stTabs"] button[data-baseweb="tab"] { /* Target individual tab buttons */
+        /* --- Size & Spacing --- */
+        padding: 14px 28px; /* Significantly increase padding */
+        margin: 0 5px -2px 0; /* Adjust margin: top/right/bottom/left - negative bottom margin overlaps the border */
+        font-size: 1.1em;  /* Increase font size */
+        font-weight: 500;  /* Slightly bolder text */
+        min-height: 50px; /* Ensure a decent minimum height */
+        display: inline-flex; /* Align icon and text nicely */
+        align-items: center;
+        justify-content: center;
+
+        /* --- Appearance --- */
+        color: #475569; /* Default tab text color (slate gray) */
+        background-color: #f1f5f9; /* Light background for inactive tabs */
+        border: 1px solid #e2e8f0; /* Border around tabs */
+        border-bottom: none; /* Remove bottom border initially */
+        border-radius: 8px 8px 0 0; /* Round only the top corners */
+        transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; /* Smooth transitions */
+        position: relative; /* Needed for z-index or positioning tricks */
+        top: 2px; /* Move inactive tabs down slightly to meet the border */
+        cursor: pointer; /* Add pointer cursor */
+    }
+
+    /* --- Tab Hover State --- */
+    div[data-testid="stTabs"] button[data-baseweb="tab"]:hover {
+        background-color: #e2e8f0; /* Slightly darker background on hover */
+        color: #1e3a8a; /* Darker blue text on hover */
+        border-color: #cbd5e1; /* Match border color on hover */
+    }
+
+    /* --- Active Tab State --- */
+    div[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"] {
+        background-color: #ffffff; /* White background for active tab (looks connected to content) */
+        color: #0061ff; /* Primary blue text */
+        font-weight: 600; /* Bolder text for active tab */
+        border-color: #cbd5e1; /* Match the container's bottom border color */
+        border-bottom: 2px solid #ffffff; /* White bottom border to cover the container line */
+        top: 0px; /* Bring active tab to the front (vertically) */
+        /* Optional: subtle shadow to lift active tab */
+        box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.04);
+    }
+
+    /* --- Adjust Tab Panel --- */
+    div[data-testid="stTabPanel"] {
+        border: 1px solid #cbd5e1; /* Add border to content panel */
+        border-top: none; /* Remove top border as tabs handle it */
+        padding: 30px 25px; /* Add padding inside the content panel */
+        border-radius: 0 0 10px 10px; /* Round bottom corners to match cards */
+        margin-top: -2px; /* Pull panel up slightly to meet tabs */
+        background-color: #ffffff; /* Ensure content background is white */
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.04); /* Subtle shadow for panel */
+        margin-bottom: 30px; /* Add space below the entire tab panel */
+    }
+
+
+    /* --- Tab Headers (Content Headers Inside Tab Panels) --- */
+    .tab-header {
+        color: #004aad; /* Darker blue */
+        font-weight: 700; /* Bolder */
+        border-bottom: 4px solid #0061ff; /* Thicker border */
+        padding-bottom: 12px; /* Increased padding */
+        margin-top: 0px; /* Reduced top margin as panel has padding */
+        margin-bottom: 35px; /* Increased space below header */
+        font-size: 1.9em; /* Slightly larger */
+        display: flex;
+        align-items: center;
+        gap: 12px; /* Space between icon and text if icon added */
+    }
+
+     /* --- Sub Headers (e.g., Historical/Forecast) --- */
+    .sub-header {
+        color: #1e293b; /* Dark slate color */
+        font-weight: 600; /* Slightly bolder */
+        margin-top: 30px; /* Increased space above */
+        margin-bottom: 20px; /* Increased space below */
+        font-size: 1.5em; /* Larger */
+        border-left: 6px solid #007bff; /* Thicker border */
+        padding-left: 15px; /* Increased padding */
+        background-color: #f8f9fa; /* Very Subtle background highlight */
+        padding-top: 8px; /* Add vertical padding */
+        padding-bottom: 8px;
+        border-radius: 4px; /* Slightly rounded corners */
+    }
+
+
+    /* --- Info Cards --- */
+    .card-container { /* This class wraps the columns for inventory cards */
+        display: flex; /* Use flexbox for horizontal layout */
+        gap: 25px; /* More space between cards */
+        margin-bottom: 30px; /* Space below the card row */
+        justify-content: space-around; /* Distribute space */
+        flex-wrap: wrap; /* Allow wrapping on smaller screens */
+    }
+    .info-card, .warning-card, .success-card, .neutral-card {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0; /* Softer border */
+        border-radius: 10px; /* More rounded */
+        padding: 25px; /* More padding */
+        box-shadow: 0 5px 10px rgba(0, 0, 0, 0.05);
+        transition: transform 0.25s ease, box-shadow 0.25s ease;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        flex: 1; /* Allow cards to grow and fill space */
+        min-width: 180px; /* Minimum width before wrapping */
+    }
+    .info-card:hover, .warning-card:hover, .success-card:hover, .neutral-card:hover {
+        transform: translateY(-5px); /* Slightly more lift */
+        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.08);
+    }
+    .card-label {
+        font-size: 1em; /* Slightly larger label */
+        color: #475569; /* Slate gray */
+        margin-bottom: 10px;
+        font-weight: 500;
+    }
+    .card-value {
+        font-size: 2.2em; /* Larger value */
+        font-weight: 700; /* Bolder value */
+    }
+    /* Card Accent Colors (using left border and text color) */
+    .info-card { border-left: 6px solid #3b82f6; } /* Blue */
+    .info-card .card-value { color: #3b82f6; }
+    .warning-card { border-left: 6px solid #f59e0b; } /* Amber */
+    .warning-card .card-value { color: #f59e0b; }
+    .success-card { border-left: 6px solid #10b981; } /* Emerald */
+    .success-card .card-value { color: #10b981; }
+    .neutral-card { border-left: 6px solid #64748b; } /* Slate */
+    .neutral-card .card-value { color: #64748b; }
+
+
+    /* --- Legend Styling --- */
+    .legend-container {
+        margin-top: 10px; /* Added top margin */
+        margin-bottom: 25px;
+        padding: 15px 20px; /* More padding */
+        background-color: #eef2f9; /* Lighter background */
+        border: 1px solid #dbeafe; /* Light blue border */
+        border-radius: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 20px; /* More space between items */
+        align-items: center;
+    }
+    .legend-title {
+        font-weight: 600;
+        margin-right: 15px;
+        color: #1e3a8a; /* Darker blue */
+    }
+    .legend-item {
+        display: inline-flex;
+        align-items: center;
+        padding: 6px 12px;
+        border-radius: 16px; /* Pill shape */
+        font-size: 0.95em;
+        border: 1px solid transparent; /* Keep border definition */
+    }
+    .legend-color-box {
+        width: 14px; /* Slightly larger */
+        height: 14px;
+        margin-right: 10px;
+        border-radius: 4px; /* Slightly rounded */
+        display: inline-block;
+    }
+    /* Legend Item Colors (using lighter backgrounds and distinct text colors) */
+    .legend-red { background-color: #fee2e2; border-color: #fecaca; color: #b91c1c;}
+    .legend-red .legend-color-box { background-color: #ef4444; } /* Red-500 */
+    .legend-orange { background-color: #ffedd5; border-color: #fed7aa; color: #c2410c;}
+    .legend-orange .legend-color-box { background-color: #f97316; } /* Orange-500 */
+    .legend-green { background-color: #dcfce7; border-color: #bbf7d0; color: #15803d;}
+    .legend-green .legend-color-box { background-color: #22c55e; } /* Green-500 */
+
+
+    /* --- Section Spacing --- */
+    .section-divider {
+        margin-top: 40px;
+        margin-bottom: 40px;
+        border-top: 1px solid #dde4ed; /* Thicker/more prominent */
+    }
+
+
+    /* --- Enhanced Dataframe Styling --- */
+    .stDataFrame {
+        margin-top: 15px; /* Reduced top margin as sub-header has more bottom margin */
+        margin-bottom: 30px; /* Add space below dataframe */
+        border-radius: 8px; /* Slightly less rounded */
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06); /* Slightly stronger shadow */
+        border: 1px solid #d1d9e6; /* Slightly darker border */
+    }
+     /* Dataframe header */
+     .stDataFrame thead th {
+        background-color: #f1f5f9; /* Lighter slate blue */
+        color: #0f172a; /* Dark text */
+        font-weight: 600;
+        border-bottom: 2px solid #cbd5e1; /* Stronger bottom border */
+        padding: 12px 15px; /* Increase padding */
+        text-align: left; /* Ensure left alignment */
+        text-transform: uppercase; /* Uppercase headers */
+        font-size: 0.85em; /* Slightly smaller header font */
+        letter-spacing: 0.5px; /* Add letter spacing */
+     }
+     /* Dataframe body cells */
+     .stDataFrame tbody td {
+        padding: 10px 15px; /* Adjust padding */
+        border-bottom: 1px solid #e2e8f0; /* Lighter row separator */
+        vertical-align: middle; /* Align text vertically */
+     }
+     /* Zebra striping for rows */
+     .stDataFrame tbody tr:nth-child(odd) td {
+        background-color: #f8fafc; /* Very light grey for odd rows */
+     }
+     /* Hover effect for rows */
+     .stDataFrame tbody tr:hover td {
+        background-color: #eef2f9; /* Light blue hover */
+     }
+
+     /* --- Map Styling --- */
+    .stPyDeckChart {
+        margin-top: 25px;
+        border-radius: 10px; /* Match card rounding */
+        overflow: hidden; /* Important for border-radius */
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.04);
+        border: 1px solid #e2e8f0; /* Subtle border */
+        margin-bottom: 25px; /* Add space below map */
+    }
+
+    /* --- Footer Caption Style (Original - Not Used Now) --- */
+     .footer-caption {
+        text-align: center;
+        font-style: italic;
+        color: #94a3b8; /* Lighter grey */
+        margin-top: 50px;
+        border-top: 1px solid #e2e8f0;
+        padding-top: 20px;
+        font-size: 0.85em;
+     }
+
+     /* --- Specific adjustments for Rider Route Tooltip --- */
+     .deck-tooltip {
+         background-color: rgba(0,0,0,0.75) !important; /* Slightly darker tooltip */
+         color: white !important;
+         border-radius: 5px !important;
+         padding: 8px 12px !important;
+         font-size: 0.9em !important;
+         box-shadow: 0 2px 5px rgba(0,0,0,0.2); /* Add shadow to tooltip */
+     }
+
+    /* --- Specific Container for Forecast Tab (Optional for Scoping - not strictly needed now) --- */
+    /* .forecast-tab-content { padding: 10px; } */
+
+
+</style>
+"""
+
+def apply_styling():
+    """Applies the custom APP CSS to the Streamlit app."""
+    # Note: The HCL CSS is already applied separately above
+    st.markdown(APP_STYLE, unsafe_allow_html=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
